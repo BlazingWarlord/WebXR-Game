@@ -2,104 +2,340 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Quest 3 Sci-Fi Superhero Arena</title>
+  <title>Stark Armor Protocol - Quest 3</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <!-- A-Frame 1.6.0 Core -->
   <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
 
   <script>
-    // --- GLOBAL GAME STATE ---
+    // --- GLOBAL STARK PROTOCOL STATE ---
     window.GameState = {
       playerHP: 100,
-      playerMaxHP: 100,
       score: 0,
-      gunEquipped: false,
-      shieldActive: false,
       isGameOver: false,
-      robots: []
+      shieldActive: false,
+      robots: [],
+
+      // Weapon System
+      weapons: ['REPULSOR', 'RED LASER', 'MISSILES'],
+      currentWeaponIdx: 0,
+      
+      // Weapon 1: Red Continuous Laser
+      laserActive: false,
+      laserCharge: 5.0,    // 5 seconds max
+      laserCooldown: 0.0,  // 10 seconds cooldown
+      
+      // Weapon 2: Missiles
+      missilesLeft: 10
     };
 
-    function updateHUD() {
-      const hpBar = document.getElementById('player-hp-bar');
-      const hudText = document.getElementById('player-hud-text');
-      if (!hpBar || !hudText) return;
-
-      const ratio = Math.max(0, window.GameState.playerHP / window.GameState.playerMaxHP);
-      hpBar.setAttribute('scale', `${ratio} 1 1`);
-
-      if (window.GameState.isGameOver) {
-        hudText.setAttribute('value', `MISSION FAILED! SCORE: ${window.GameState.score}\nPULL RIGHT TRIGGER TO RESTART`);
-        hudText.setAttribute('color', '#ef4444');
-      } else {
-        hudText.setAttribute('value', `HP: ${window.GameState.playerHP}%  |  SCORE: ${window.GameState.score}`);
-        hudText.setAttribute('color', '#38bdf8');
+    // --- SOUND EFFECTS (Web Audio API - Zero External Files) ---
+    const SoundFx = {
+      ctx: null,
+      init: function() {
+        if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      },
+      playRepulsor: function() {
+        this.init();
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(800, this.ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(120, this.ctx.currentTime + 0.15);
+        gain.gain.setValueAtTime(0.3, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.15);
+        osc.connect(gain); gain.connect(this.ctx.destination);
+        osc.start(); osc.stop(this.ctx.currentTime + 0.16);
+      },
+      playLaserBeam: function() {
+        this.init();
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(450, this.ctx.currentTime);
+        gain.gain.setValueAtTime(0.12, this.ctx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.01, this.ctx.currentTime + 0.1);
+        osc.connect(gain); gain.connect(this.ctx.destination);
+        osc.start(); osc.stop(this.ctx.currentTime + 0.1);
+      },
+      playMissile: function() {
+        this.init();
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(150, this.ctx.currentTime);
+        osc.frequency.linearRampToValueAtTime(60, this.ctx.currentTime + 0.35);
+        gain.gain.setValueAtTime(0.4, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.35);
+        osc.connect(gain); gain.connect(this.ctx.destination);
+        osc.start(); osc.stop(this.ctx.currentTime + 0.36);
+      },
+      playDeflect: function() {
+        this.init();
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1200, this.ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(300, this.ctx.currentTime + 0.1);
+        gain.gain.setValueAtTime(0.3, this.ctx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.01, this.ctx.currentTime + 0.1);
+        osc.connect(gain); gain.connect(this.ctx.destination);
+        osc.start(); osc.stop(this.ctx.currentTime + 0.11);
       }
-    }
+    };
 
-    // --- RIGHT JOYSTICK SMOOTH LOCOMOTION & PICKUP ---
-    AFRAME.registerComponent('right-stick-locomotion', {
-      schema: { speed: { default: 3.5 } },
+    // --- HELMET HUD CONTROLLER ---
+    AFRAME.registerComponent('helmet-hud-system', {
+      init: function() {
+        this.hpFill = document.getElementById('hud-hp-fill');
+        this.hpVal = document.getElementById('hud-hp-val');
+        this.weaponVal = document.getElementById('hud-weapon-val');
+        this.weaponSub = document.getElementById('hud-weapon-sub');
+        this.scoreVal = document.getElementById('hud-score-val');
+        this.targetLock = document.getElementById('hud-target-bracket');
+        this.horizonBar = document.getElementById('hud-horizon-bar');
+      },
+      tick: function(t, dt) {
+        if (!dt) return;
+        const gs = window.GameState;
+
+        // Laser recharge & cooldown timers
+        if (gs.laserCooldown > 0) {
+          gs.laserCooldown -= dt / 1000;
+          if (gs.laserCooldown <= 0) {
+            gs.laserCooldown = 0;
+            gs.laserCharge = 5.0;
+          }
+        } else if (!gs.laserActive && gs.laserCharge < 5.0) {
+          gs.laserCharge = Math.min(5.0, gs.laserCharge + (dt / 1000) * 0.5);
+        }
+
+        // Update Armor Health UI
+        const hpRatio = Math.max(0, gs.playerHP / 100);
+        this.hpFill.setAttribute('scale', `${hpRatio} 1 1`);
+        this.hpVal.setAttribute('value', `ARMOR: ${gs.playerHP}%`);
+
+        // Update Weapon Status UI
+        const activeName = gs.weapons[gs.currentWeaponIdx];
+        this.weaponVal.setAttribute('value', `SYS: ${activeName}`);
+        
+        if (activeName === 'REPULSOR') {
+          this.weaponSub.setAttribute('value', 'AMMO: INFINITE');
+          this.weaponSub.setAttribute('color', '#38bdf8');
+        } else if (activeName === 'RED LASER') {
+          if (gs.laserCooldown > 0) {
+            this.weaponSub.setAttribute('value', `OVERHEAT! COOLDOWN: ${Math.ceil(gs.laserCooldown)}s`);
+            this.weaponSub.setAttribute('color', '#ef4444');
+          } else {
+            this.weaponSub.setAttribute('value', `CHARGE: ${(gs.laserCharge).toFixed(1)}s / 5.0s`);
+            this.weaponSub.setAttribute('color', '#f87171');
+          }
+        } else if (activeName === 'MISSILES') {
+          this.weaponSub.setAttribute('value', `PODS: ${gs.missilesLeft} / 10 REMAINING`);
+          this.weaponSub.setAttribute('color', gs.missilesLeft > 0 ? '#fbbf24' : '#ef4444');
+        }
+
+        this.scoreVal.setAttribute('value', `TARGETS ELIMINATED: ${gs.score}`);
+
+        // HUD pitch stabilizer tilt
+        const cam = document.getElementById('camera');
+        if (cam && this.horizonBar) {
+          const rotZ = cam.object3D.rotation.z;
+          this.horizonBar.setAttribute('rotation', `0 0 ${-rotZ * (180 / Math.PI)}`);
+        }
+      }
+    });
+
+    // --- RIGHT JOYSTICK LOCOMOTION ---
+    AFRAME.registerComponent('stark-locomotion', {
+      schema: { speed: { default: 4.2 } },
       init: function () {
         this.rig = document.getElementById('rig');
         this.camera = document.getElementById('camera');
         this.axisX = 0;
         this.axisY = 0;
 
-        // Thumbstick axes
         this.el.addEventListener('axismove', (e) => {
           const axis = e.detail.axis;
-          if (axis.length >= 2) {
-            this.axisX = axis[0];
-            this.axisY = axis[1];
-          }
+          if (axis.length >= 2) { this.axisX = axis[0]; this.axisY = axis[1]; }
           if (axis.length >= 4 && (Math.abs(axis[2]) > 0.1 || Math.abs(axis[3]) > 0.1)) {
-            this.axisX = axis[2];
-            this.axisY = axis[3];
+            this.axisX = axis[2]; this.axisY = axis[3];
           }
         });
-
-        // Joystick click or grip button to equip gun
-        this.el.addEventListener('thumbstickdown', () => this.tryEquipGun());
-        this.el.addEventListener('gripdown', () => this.tryEquipGun());
-      },
-      tryEquipGun: function () {
-        if (window.GameState.gunEquipped) return;
-        const rigPos = this.rig.object3D.position;
-        const pedestal = document.getElementById('pedestal');
-        if (pedestal) {
-          const pPos = pedestal.object3D.position;
-          // Check if player is near pedestal (< 3.5m)
-          if (rigPos.distanceTo(pPos) < 3.5) {
-            window.GameState.gunEquipped = true;
-            document.getElementById('gun-world-model').setAttribute('visible', 'false');
-            document.getElementById('right-hand-gun').setAttribute('visible', 'true');
-            document.getElementById('equip-hint').setAttribute('visible', 'false');
-          }
-        }
       },
       tick: function (time, delta) {
         if (!delta || (Math.abs(this.axisX) < 0.15 && Math.abs(this.axisY) < 0.15)) return;
-
-        // Auto pickup if walking right into the pedestal
-        if (!window.GameState.gunEquipped) {
-          this.tryEquipGun();
-        }
-
         const moveSpeed = (this.data.speed * delta) / 1000;
         const camYaw = this.camera.object3D.rotation.y;
-
         const dx = this.axisX * Math.cos(camYaw) + this.axisY * Math.sin(camYaw);
         const dz = -this.axisX * Math.sin(camYaw) + this.axisY * Math.cos(camYaw);
-
         this.rig.object3D.position.x += dx * moveSpeed;
         this.rig.object3D.position.z += dz * moveSpeed;
       }
     });
 
-    // --- LEFT CONTROLLER: SUPERHERO SHIELD ---
-    AFRAME.registerComponent('left-controller-shield', {
+    // --- RIGHT CONTROLLER: WEAPONS & WEAPON SWITCHING ---
+    AFRAME.registerComponent('stark-arsenal', {
       init: function () {
-        this.shieldMesh = document.getElementById('superhero-shield');
+        this.laserBeam = document.getElementById('red-laser-beam');
+        this.triggerHeld = false;
+
+        // Grip Button: Cycle Weapons
+        this.el.addEventListener('gripdown', () => {
+          SoundFx.init();
+          window.GameState.currentWeaponIdx = (window.GameState.currentWeaponIdx + 1) % window.GameState.weapons.length;
+          // Deactivate laser if switching off
+          this.stopLaser();
+        });
+
+        // Trigger Down
+        this.el.addEventListener('triggerdown', () => {
+          if (window.GameState.isGameOver) {
+            window.GameState.playerHP = 100;
+            window.GameState.score = 0;
+            window.GameState.missilesLeft = 10;
+            window.GameState.isGameOver = false;
+            return;
+          }
+
+          const curWeapon = window.GameState.weapons[window.GameState.currentWeaponIdx];
+          if (curWeapon === 'REPULSOR') {
+            this.fireRepulsor();
+          } else if (curWeapon === 'RED LASER') {
+            if (window.GameState.laserCooldown <= 0 && window.GameState.laserCharge > 0) {
+              this.startLaser();
+            }
+          } else if (curWeapon === 'MISSILES') {
+            this.fireMissile();
+          }
+          this.triggerHeld = true;
+        });
+
+        // Trigger Up
+        this.el.addEventListener('triggerup', () => {
+          this.triggerHeld = false;
+          this.stopLaser();
+        });
+      },
+      startLaser: function() {
+        window.GameState.laserActive = true;
+        this.laserBeam.setAttribute('visible', 'true');
+      },
+      stopLaser: function() {
+        window.GameState.laserActive = false;
+        if (this.laserBeam) this.laserBeam.setAttribute('visible', 'false');
+      },
+      fireRepulsor: function () {
+        SoundFx.playRepulsor();
+        const scene = this.el.sceneEl;
+        const worldPos = new THREE.Vector3();
+        const worldQuat = new THREE.Quaternion();
+        this.el.object3D.getWorldPosition(worldPos);
+        this.el.object3D.getWorldQuaternion(worldQuat);
+
+        const fireDir = new THREE.Vector3(0, 0, -1).applyQuaternion(worldQuat).normalize();
+
+        const bolt = document.createElement('a-entity');
+        bolt.object3D.position.copy(worldPos);
+        bolt.object3D.quaternion.copy(worldQuat);
+
+        const core = document.createElement('a-cylinder');
+        core.setAttribute('radius', '0.035');
+        core.setAttribute('height', '0.6');
+        core.setAttribute('rotation', '90 0 0');
+        core.setAttribute('material', 'color: #00ffff; emissive: #00ffff; emissiveIntensity: 3');
+        bolt.appendChild(core);
+
+        bolt.setAttribute('projectile', {
+          direction: `${fireDir.x} ${fireDir.y} ${fireDir.z}`,
+          speed: 40,
+          damage: 35,
+          isEnemy: false
+        });
+        scene.appendChild(bolt);
+      },
+      fireMissile: function () {
+        if (window.GameState.missilesLeft <= 0) return;
+        window.GameState.missilesLeft--;
+        SoundFx.playMissile();
+
+        const scene = this.el.sceneEl;
+        const worldPos = new THREE.Vector3();
+        const worldQuat = new THREE.Quaternion();
+        this.el.object3D.getWorldPosition(worldPos);
+        this.el.object3D.getWorldQuaternion(worldQuat);
+
+        const fireDir = new THREE.Vector3(0, 0, -1).applyQuaternion(worldQuat).normalize();
+
+        const rocket = document.createElement('a-entity');
+        rocket.object3D.position.copy(worldPos);
+        rocket.object3D.quaternion.copy(worldQuat);
+
+        // Detailed micro-missile geometry
+        const body = document.createElement('a-cylinder');
+        body.setAttribute('radius', '0.04');
+        body.setAttribute('height', '0.45');
+        body.setAttribute('rotation', '90 0 0');
+        body.setAttribute('material', 'color: #e2e8f0; metalness: 0.9; roughness: 0.2');
+        
+        const thrusterGlow = document.createElement('a-sphere');
+        thrusterGlow.setAttribute('radius', '0.05');
+        thrusterGlow.setAttribute('position', '0 0 0.23');
+        thrusterGlow.setAttribute('material', 'color: #f59e0b; emissive: #f59e0b; emissiveIntensity: 4');
+        
+        rocket.appendChild(body);
+        rocket.appendChild(thrusterGlow);
+
+        rocket.setAttribute('projectile', {
+          direction: `${fireDir.x} ${fireDir.y} ${fireDir.z}`,
+          speed: 30,
+          damage: 100, // Instant destruction
+          isEnemy: false
+        });
+        scene.appendChild(rocket);
+      },
+      tick: function (t, dt) {
+        if (!dt) return;
+        const gs = window.GameState;
+
+        // Continuous Red Laser Logic
+        if (gs.laserActive) {
+          SoundFx.playLaserBeam();
+          gs.laserCharge -= dt / 1000;
+
+          // Check if laser hits any robot
+          const worldPos = new THREE.Vector3();
+          const worldQuat = new THREE.Quaternion();
+          this.el.object3D.getWorldPosition(worldPos);
+          this.el.object3D.getWorldQuaternion(worldQuat);
+          const rayDir = new THREE.Vector3(0, 0, -1).applyQuaternion(worldQuat).normalize();
+
+          for (let robotEl of gs.robots) {
+            if (!robotEl.parentNode || robotEl.components['combat-sentry'].isDead) continue;
+            const rPos = robotEl.object3D.position;
+            const toRobot = new THREE.Vector3().subVectors(rPos, worldPos);
+            const distAlongRay = toRobot.dot(rayDir);
+
+            if (distAlongRay > 0 && distAlongRay < 25) {
+              const closestPoint = new THREE.Vector3().copy(worldPos).addScaledVector(rayDir, distAlongRay);
+              if (closestPoint.distanceTo(rPos) < 1.1) {
+                robotEl.components['combat-sentry'].takeDamage(55 * (dt / 1000));
+              }
+            }
+          }
+
+          if (gs.laserCharge <= 0) {
+            gs.laserCharge = 0;
+            gs.laserCooldown = 10.0; // Trigger 10-sec cooldown
+            this.stopLaser();
+          }
+        }
+      }
+    });
+
+    // --- LEFT CONTROLLER: HOLOGRAPHIC RECTANGULAR SHIELD ---
+    AFRAME.registerComponent('left-stark-shield', {
+      init: function () {
+        this.shieldMesh = document.getElementById('nano-shield');
         this.el.addEventListener('triggerdown', () => {
           window.GameState.shieldActive = true;
           this.shieldMesh.setAttribute('visible', 'true');
@@ -111,64 +347,12 @@
       }
     });
 
-    // --- RIGHT CONTROLLER: PRECISION BLASTER ---
-    AFRAME.registerComponent('right-controller-blaster', {
-      init: function () {
-        this.el.addEventListener('triggerdown', () => {
-          if (window.GameState.isGameOver) {
-            // Restart game on trigger pull
-            window.GameState.playerHP = 100;
-            window.GameState.score = 0;
-            window.GameState.isGameOver = false;
-            updateHUD();
-            return;
-          }
-          if (!window.GameState.gunEquipped) return;
-          this.fireLaser();
-        });
-      },
-      fireLaser: function () {
-        const scene = this.el.sceneEl;
-        const muzzle = document.getElementById('gun-muzzle');
-        const gunModel = document.getElementById('right-hand-gun');
-        
-        // Accurate muzzle world position
-        const spawnPos = new THREE.Vector3();
-        muzzle.object3D.getWorldPosition(spawnPos);
-
-        // Calculate forward direction along barrel sightline (-Z in Three.js)
-        const worldQuat = new THREE.Quaternion();
-        gunModel.object3D.getWorldQuaternion(worldQuat);
-        const fireDir = new THREE.Vector3(0, 0, -1).applyQuaternion(worldQuat).normalize();
-
-        // Projectile container
-        const laser = document.createElement('a-entity');
-        laser.object3D.position.copy(spawnPos);
-        laser.object3D.quaternion.copy(worldQuat);
-
-        // Visual beam aligned with travel path
-        const beam = document.createElement('a-cylinder');
-        beam.setAttribute('radius', '0.018');
-        beam.setAttribute('height', '0.5');
-        beam.setAttribute('rotation', '90 0 0');
-        beam.setAttribute('material', 'color: #00ffff; emissive: #00ffff; emissiveIntensity: 3');
-        laser.appendChild(beam);
-
-        laser.setAttribute('projectile', {
-          direction: `${fireDir.x} ${fireDir.y} ${fireDir.z}`,
-          speed: 35,
-          isEnemy: false
-        });
-
-        scene.appendChild(laser);
-      }
-    });
-
-    // --- BULLET & PROJECTILE PHYSICS ---
+    // --- PROJECTILES (ORANGE LASERS & MISSILES) ---
     AFRAME.registerComponent('projectile', {
       schema: {
         direction: { type: 'vec3' },
-        speed: { default: 20 },
+        speed: { default: 22 },
+        damage: { default: 20 },
         isEnemy: { default: false },
         life: { default: 3.5 }
       },
@@ -183,50 +367,49 @@
         this.age += dt / 1000;
 
         if (this.age > this.data.life) {
-          this.destroyProjectile();
+          this.destroyBullet();
           return;
         }
 
         const bulletPos = this.el.object3D.position;
 
-        // Player laser hitting Robots
+        // Player attacks Robot
         if (!this.data.isEnemy) {
           for (let robotEl of window.GameState.robots) {
-            if (!robotEl.parentNode || robotEl.components['enemy-robot'].isDead) continue;
-            const rPos = robotEl.object3D.position;
-            if (bulletPos.distanceTo(rPos) < 1.0) {
-              robotEl.components['enemy-robot'].takeDamage(35);
-              this.destroyProjectile();
+            if (!robotEl.parentNode || robotEl.components['combat-sentry'].isDead) continue;
+            if (bulletPos.distanceTo(robotEl.object3D.position) < 1.1) {
+              robotEl.components['combat-sentry'].takeDamage(this.data.damage);
+              this.destroyBullet();
               return;
             }
           }
         } 
-        // Robot laser hitting Player or Shield
+        // Robot attacks Player
         else {
           if (window.GameState.isGameOver) {
-            this.destroyProjectile();
+            this.destroyBullet();
             return;
           }
 
-          // 1. Check Shield Collision
+          // Check Shield Deflection
           if (window.GameState.shieldActive) {
-            const shieldEl = document.getElementById('superhero-shield');
+            const shieldEl = document.getElementById('nano-shield');
             const shieldPos = new THREE.Vector3();
             shieldEl.object3D.getWorldPosition(shieldPos);
 
-            if (bulletPos.distanceTo(shieldPos) < 0.85) {
-              // Visual shield impact flash
-              const outerRing = document.getElementById('shield-outer-ring');
-              if (outerRing) {
-                outerRing.setAttribute('material', 'emissiveIntensity', 4);
-                setTimeout(() => outerRing.setAttribute('material', 'emissiveIntensity', 1.8), 120);
+            if (bulletPos.distanceTo(shieldPos) < 1.0) {
+              SoundFx.playDeflect();
+              const corePlane = document.getElementById('shield-core-plane');
+              if (corePlane) {
+                corePlane.setAttribute('material', 'emissiveIntensity', 4);
+                setTimeout(() => corePlane.setAttribute('material', 'emissiveIntensity', 1.2), 100);
               }
-              this.destroyProjectile();
+              this.destroyBullet();
               return;
             }
           }
 
-          // 2. Check Player Hit
+          // Check Player Body Hit
           const cam = document.getElementById('camera');
           const playerPos = new THREE.Vector3();
           cam.object3D.getWorldPosition(playerPos);
@@ -236,245 +419,269 @@
             if (window.GameState.playerHP === 0) {
               window.GameState.isGameOver = true;
             }
-            updateHUD();
-            this.destroyProjectile();
+            this.destroyBullet();
             return;
           }
         }
       },
-      destroyProjectile: function () {
-        if (this.el.parentNode) {
-          this.el.parentNode.removeChild(this.el);
-        }
+      destroyBullet: function () {
+        if (this.el.parentNode) this.el.parentNode.removeChild(this.el);
       }
     });
 
-    // --- ENEMY ROBOT CONTROLLER (SMOOTH RESPAWN & HEALTH) ---
-    AFRAME.registerComponent('enemy-robot', {
+    // --- HIGH-TECH HOVER ROBOT SENTRY ---
+    AFRAME.registerComponent('combat-sentry', {
       schema: { hp: { default: 100 } },
       init: function () {
         this.maxHp = this.data.hp;
         this.currentHp = this.data.hp;
         this.isDead = false;
-        this.shootTimer = Math.random() * 2 + 1.5;
-        this.targetPos = new THREE.Vector3((Math.random() - 0.5) * 14, 1.8 + Math.random(), -5 - Math.random() * 8);
+        this.shootTimer = Math.random() * 2 + 1.2;
+        this.targetPos = new THREE.Vector3((Math.random() - 0.5) * 16, 2.0 + Math.random(), -6 - Math.random() * 8);
 
         window.GameState.robots.push(this.el);
-        this.hpBar = this.el.querySelector('.robot-hp-fill');
+        this.hpFill = this.el.querySelector('.sentry-hp-fill');
       },
       tick: function (t, dt) {
         if (!dt || this.isDead) return;
 
         const cam = document.getElementById('camera');
-        const worldPlayerPos = new THREE.Vector3();
-        cam.object3D.getWorldPosition(worldPlayerPos);
+        const playerPos = new THREE.Vector3();
+        cam.object3D.getWorldPosition(playerPos);
 
-        // Smooth cruising within arena bounds
+        // Smooth hovering translation
         this.el.object3D.position.lerp(this.targetPos, 0.02);
         if (this.el.object3D.position.distanceTo(this.targetPos) < 0.8) {
-          this.targetPos.set(
-            (Math.random() - 0.5) * 14,
-            1.6 + Math.random() * 1.2,
-            -4 - Math.random() * 8
-          );
+          this.targetPos.set((Math.random() - 0.5) * 16, 1.8 + Math.random() * 1.5, -5 - Math.random() * 9);
         }
 
         // Face player
-        this.el.object3D.lookAt(worldPlayerPos.x, this.el.object3D.position.y, worldPlayerPos.z);
+        this.el.object3D.lookAt(playerPos.x, this.el.object3D.position.y, playerPos.z);
 
-        // Shooting cycle
+        // Fire Orange Laser Shots
         if (!window.GameState.isGameOver) {
           this.shootTimer -= dt / 1000;
           if (this.shootTimer <= 0) {
-            this.shootAtPlayer(worldPlayerPos);
-            this.shootTimer = 2.5 + Math.random() * 2;
+            this.shootOrangeLaser(playerPos);
+            this.shootTimer = 2.2 + Math.random() * 1.8;
           }
         }
       },
-      shootAtPlayer: function (targetVec) {
+      shootOrangeLaser: function (targetVec) {
         const scene = this.el.sceneEl;
-        const robotPos = this.el.object3D.position.clone();
-        robotPos.y += 0.1;
+        const spawnPos = this.el.object3D.position.clone();
+        spawnPos.y += 0.1;
 
-        const dir = new THREE.Vector3().subVectors(targetVec, robotPos).normalize();
+        const dir = new THREE.Vector3().subVectors(targetVec, spawnPos).normalize();
 
-        const bolt = document.createElement('a-entity');
-        bolt.setAttribute('geometry', { primitive: 'sphere', radius: 0.1 });
-        bolt.setAttribute('material', { color: '#ff1744', emissive: '#ff1744', emissiveIntensity: 2.5 });
-        bolt.object3D.position.copy(robotPos);
+        const laserBolt = document.createElement('a-entity');
+        laserBolt.object3D.position.copy(spawnPos);
 
-        bolt.setAttribute('projectile', {
+        // Glowing Orange Laser Needle
+        const beam = document.createElement('a-cylinder');
+        beam.setAttribute('radius', '0.03');
+        beam.setAttribute('height', '0.8');
+        beam.setAttribute('rotation', '90 0 0');
+        beam.setAttribute('material', 'color: #ff5722; emissive: #ff5722; emissiveIntensity: 3.5');
+        laserBolt.appendChild(beam);
+
+        laserBolt.setAttribute('projectile', {
           direction: `${dir.x} ${dir.y} ${dir.z}`,
-          speed: 11,
+          speed: 13,
           isEnemy: true
         });
 
-        scene.appendChild(bolt);
+        scene.appendChild(laserBolt);
       },
       takeDamage: function (amount) {
         if (this.isDead) return;
         this.currentHp -= amount;
         const ratio = Math.max(0, this.currentHp / this.maxHp);
-        if (this.hpBar) {
-          this.hpBar.setAttribute('scale', `${ratio} 1 1`);
+        if (this.hpFill) this.hpFill.setAttribute('scale', `${ratio} 1 1`);
+
+        // Sentry Armor Flash
+        const chassis = this.el.querySelector('.sentry-chassis');
+        if (chassis) {
+          chassis.setAttribute('material', 'color', '#ffffff');
+          setTimeout(() => chassis.setAttribute('material', 'color', '#1e293b'), 60);
         }
 
-        // Hit flash
-        const core = this.el.querySelector('.robot-core');
-        core.setAttribute('material', 'color', '#ffffff');
-        setTimeout(() => core.setAttribute('material', 'color', '#334155'), 70);
-
-        if (this.currentHp <= 0) {
-          this.die();
-        }
+        if (this.currentHp <= 0) this.destroySentry();
       },
-      die: function () {
+      destroySentry: function () {
         this.isDead = true;
-        // Award point
-        window.GameState.score += 1;
-        updateHUD();
+        window.GameState.score++;
 
-        // Death shrink animation instead of midair pop
+        // Collapse animation
         this.el.setAttribute('animation', {
           property: 'scale',
           to: '0.01 0.01 0.01',
-          dur: 250,
+          dur: 200,
           easing: 'easeInQuad'
         });
 
         setTimeout(() => {
           this.el.setAttribute('visible', 'false');
-          // Smooth respawn after 2.5 seconds
-          setTimeout(() => {
-            this.respawn();
-          }, 2500);
-        }, 250);
+          setTimeout(() => this.respawn(), 2500);
+        }, 200);
       },
       respawn: function () {
-        const rx = (Math.random() - 0.5) * 14;
-        const rz = -5 - Math.random() * 8;
-        // Spawn from high ceiling and swoop in
-        this.el.object3D.position.set(rx, 6, rz);
+        const rx = (Math.random() - 0.5) * 16;
+        const rz = -6 - Math.random() * 8;
+        this.el.object3D.position.set(rx, 7, rz);
         this.currentHp = this.maxHp;
-        if (this.hpBar) this.hpBar.setAttribute('scale', '1 1 1');
+        if (this.hpFill) this.hpFill.setAttribute('scale', '1 1 1');
 
         this.el.removeAttribute('animation');
         this.el.setAttribute('scale', '1 1 1');
         this.el.setAttribute('visible', 'true');
-
-        this.targetPos.set(rx, 1.8 + Math.random(), rz);
+        this.targetPos.set(rx, 2.0 + Math.random(), rz);
         this.isDead = false;
       }
     });
   </script>
 </head>
 <body>
-  <a-scene background="color: #030712">
-    <!-- Lighting -->
-    <a-entity light="type: ambient; color: #64748b; intensity: 0.8"></a-entity>
-    <a-entity light="type: directional; color: #ffffff; intensity: 0.9" position="4 12 5"></a-entity>
+  <a-scene background="color: #020617" fog="type: exponential; color: #030712; density: 0.02">
+    <!-- Sci-Fi Arena Lighting -->
+    <a-entity light="type: ambient; color: #38bdf8; intensity: 0.5"></a-entity>
+    <a-entity light="type: directional; color: #ffffff; intensity: 1.0" position="8 16 6"></a-entity>
 
-    <!-- Sci-Fi Arena Floor -->
-    <a-plane position="0 0 0" rotation="-90 0 0" width="28" height="28" color="#0f172a" roughness="0.9"></a-plane>
-    <a-grid width="28" height="28" color="#0284c7" opacity="0.12"></a-grid>
-    <a-cylinder position="0 2.5 -14" radius="14" height="5" side="back" open-ended="true" color="#020617"></a-cylinder>
+    <!-- Cyberpunk Reflective Floor & Arena Perimeter -->
+    <a-plane position="0 0 0" rotation="-90 0 0" width="36" height="36" color="#0b1120" roughness="0.4" metalness="0.8"></a-plane>
+    <a-grid width="36" height="36" color="#0284c7" opacity="0.18"></a-grid>
+    <a-cylinder position="0 4 -18" radius="18" height="8" side="back" open-ended="true" color="#030712"></a-cylinder>
 
-    <!-- Gun Pedestal & Pickup Zone -->
-    <a-box id="pedestal" position="0 0.5 -2.2" width="0.7" height="1" depth="0.7" color="#1e293b"></a-box>
-    <a-ring position="0 0.02 -2.2" rotation="-90 0 0" radius-inner="0.8" radius-outer="0.9" material="color: #00ffff; opacity: 0.4; transparent: true"></a-ring>
-
-    <!-- Floating Blaster on Pedestal -->
-    <a-entity id="gun-world-model" position="0 1.15 -2.2" animation="property: rotation; to: 0 360 0; loop: true; dur: 5000; easing: linear">
-      <a-box width="0.06" height="0.1" depth="0.26" color="#0284c7"></a-box>
-      <a-cylinder position="0 0.03 -0.16" rotation="90 0 0" radius="0.02" height="0.2" color="#00ffff"></a-cylinder>
-      <a-box position="0 -0.06 0.05" rotation="20 0 0" width="0.05" height="0.1" depth="0.06" color="#090d16"></a-box>
-    </a-entity>
-
-    <!-- Prompt Billboard -->
-    <a-text 
-      id="equip-hint"
-      value="STEP CLOSE & PUSH/CLICK RIGHT JOYSTICK\nTO EQUIP BLASTER" 
-      align="center" 
-      position="0 1.7 -2.2" 
-      scale="0.55 0.55 0.55" 
-      color="#38bdf8">
-    </a-text>
+    <!-- Surrounding Holographic Pillars -->
+    <a-box position="-10 3 -12" width="0.6" height="6" depth="0.6" color="#1e293b">
+      <a-plane position="0 0 0.31" width="0.2" height="5.5" material="color: #00f0ff; emissive: #00f0ff; emissiveIntensity: 2"></a-plane>
+    </a-box>
+    <a-box position="10 3 -12" width="0.6" height="6" depth="0.6" color="#1e293b">
+      <a-plane position="0 0 0.31" width="0.2" height="5.5" material="color: #00f0ff; emissive: #00f0ff; emissiveIntensity: 2"></a-plane>
+    </a-box>
 
     <!-- PLAYER RIG -->
     <a-entity id="rig" position="0 0 1">
-      <!-- Head / Camera -->
+      
+      <!-- HEAD / IRON MAN HELMET INTERIOR -->
       <a-camera id="camera" position="0 1.6 0">
-        <!-- Floating HUD (Score & Health) -->
-        <a-entity id="player-hud" position="0 -0.38 -0.8">
-          <a-plane width="0.65" height="0.06" color="#450a0a" opacity="0.85"></a-plane>
-          <a-plane id="player-hp-bar" width="0.65" height="0.06" color="#22c55e" position="0 0 0.002"></a-plane>
-          <a-text id="player-hud-text" value="HP: 100%  |  SCORE: 0" align="center" position="0 0.07 0" scale="0.22 0.22 0.22" color="#38bdf8"></a-text>
+        
+        <!-- HELMET HUD INTERIOR OVERLAY (Fixed to view at 0.55m) -->
+        <a-entity id="hud-root" position="0 0 -0.55" helmet-hud-system>
+          
+          <!-- Helmet Frame Brackets (Dark Sci-Fi Visor Perimeter) -->
+          <a-ring radius-inner="0.45" radius-outer="0.55" theta-start="35" theta-length="110" material="color: #00f0ff; opacity: 0.15; transparent: true"></a-ring>
+          <a-ring radius-inner="0.45" radius-outer="0.55" theta-start="215" theta-length="110" material="color: #00f0ff; opacity: 0.15; transparent: true"></a-ring>
+          <a-box position="-0.38 0.18 0" width="0.08" height="0.005" depth="0.001" material="color: #00f0ff; emissive: #00f0ff; emissiveIntensity: 1"></a-box>
+          <a-box position="0.38 0.18 0" width="0.08" height="0.005" depth="0.001" material="color: #00f0ff; emissive: #00f0ff; emissiveIntensity: 1"></a-box>
+
+          <!-- Center Jarvis Targeting Reticle & Pitch Ladder -->
+          <a-ring radius-inner="0.025" radius-outer="0.028" material="color: #00f0ff; emissive: #00f0ff; emissiveIntensity: 2"></a-ring>
+          <a-circle radius="0.003" material="color: #00f0ff; emissive: #00f0ff; emissiveIntensity: 3"></a-circle>
+          <a-entity id="hud-horizon-bar">
+            <a-box position="0.06 0 0" width="0.03" height="0.002" depth="0.001" material="color: #00f0ff; opacity: 0.7"></a-box>
+            <a-box position="-0.06 0 0" width="0.03" height="0.002" depth="0.001" material="color: #00f0ff; opacity: 0.7"></a-box>
+          </a-entity>
+
+          <!-- TOP STATUS: Protocol & Targets -->
+          <a-text value="STARK OS // COMBAT PROTOCOL ACTIVE" position="0 0.23 0" align="center" scale="0.11 0.11 0.11" color="#38bdf8"></a-text>
+          <a-text id="hud-score-val" value="TARGETS ELIMINATED: 0" position="0 0.205 0" align="center" scale="0.10 0.10 0.10" color="#00f0ff"></a-text>
+
+          <!-- LEFT HUD: Armor Integrity -->
+          <a-entity position="-0.26 -0.12 0">
+            <a-plane width="0.18" height="0.015" color="#7f1d1d" opacity="0.6"></a-plane>
+            <a-plane id="hud-hp-fill" width="0.18" height="0.015" color="#00f0ff" position="0 0 0.001" material="emissive: #00f0ff; emissiveIntensity: 1.5"></a-plane>
+            <a-text id="hud-hp-val" value="ARMOR: 100%" position="-0.09 0.02 0" scale="0.10 0.10 0.10" color="#00f0ff"></a-text>
+            <a-text value="SHIELD: LEFT TRIGGER" position="-0.09 -0.02 0" scale="0.075 0.075 0.075" color="#94a3b8"></a-text>
+          </a-entity>
+
+          <!-- RIGHT HUD: Weapon Selection & Ammo -->
+          <a-entity position="0.26 -0.12 0">
+            <a-text id="hud-weapon-val" value="SYS: REPULSOR" position="0.09 0.02 0" align="right" scale="0.10 0.10 0.10" color="#38bdf8"></a-text>
+            <a-text id="hud-weapon-sub" value="AMMO: INFINITE" position="0.09 -0.002 0" align="right" scale="0.08 0.08 0.08" color="#38bdf8"></a-text>
+            <a-text value="CYCLE: RIGHT GRIP" position="0.09 -0.022 0" align="right" scale="0.075 0.075 0.075" color="#94a3b8"></a-text>
+          </a-entity>
         </a-entity>
       </a-camera>
 
-      <!-- LEFT HAND: SUPERHERO SHIELD -->
-      <a-entity id="leftHand" hand-controls="hand: left" left-controller-shield>
-        <!-- Superhero Shield Geometry (Anchored to Left Forearm, Facing Outward) -->
-        <a-entity id="superhero-shield" position="0 0.06 -0.15" rotation="-15 0 0" visible="false">
-          <!-- Outer Energy Rim -->
-          <a-ring id="shield-outer-ring" radius-inner="0.48" radius-outer="0.53" material="color: #00ffff; emissive: #00ffff; emissiveIntensity: 1.8; side: double"></a-ring>
-          <!-- Translucent Main Vibranium/Energy Barrier -->
-          <a-circle radius="0.5" material="color: #0369a1; opacity: 0.55; transparent: true; roughness: 0.2; metalness: 0.8; side: double"></a-circle>
-          <!-- Inner Concentric Ring -->
-          <a-ring radius-inner="0.28" radius-outer="0.32" material="color: #ffffff; emissive: #38bdf8; emissiveIntensity: 1.4; side: double"></a-ring>
-          <!-- Superhero Center Star / Crest -->
-          <a-box width="0.16" height="0.03" depth="0.01" rotation="0 0 0" material="color: #ffffff; emissive: #ffffff; emissiveIntensity: 1.5"></a-box>
-          <a-box width="0.16" height="0.03" depth="0.01" rotation="0 0 90" material="color: #ffffff; emissive: #ffffff; emissiveIntensity: 1.5"></a-box>
-          <a-box width="0.16" height="0.03" depth="0.01" rotation="0 0 45" material="color: #ffffff; emissive: #ffffff; emissiveIntensity: 1.5"></a-box>
-          <a-box width="0.16" height="0.03" depth="0.01" rotation="0 0 -45" material="color: #ffffff; emissive: #ffffff; emissiveIntensity: 1.5"></a-box>
+      <!-- LEFT HAND: HOLOGRAPHIC RECTANGULAR SHIELD -->
+      <a-entity id="leftHand" hand-controls="hand: left" left-stark-shield>
+        <!-- Stark Nano-Shield: Rectangular Holographic Hard-Light Barrier -->
+        <a-entity id="nano-shield" position="0 0.08 -0.15" rotation="0 0 0" visible="false">
+          <!-- Main Translucent Cyan Barrier -->
+          <a-plane id="shield-core-plane" width="0.95" height="1.3" material="color: #00f0ff; opacity: 0.45; transparent: true; emissive: #00f0ff; emissiveIntensity: 1.2; side: double"></a-plane>
+          <!-- Outer Structural Neon Border -->
+          <a-box position="0 0.65 0" width="0.98" height="0.02" depth="0.01" material="color: #ffffff; emissive: #00f0ff; emissiveIntensity: 3"></a-box>
+          <a-box position="0 -0.65 0" width="0.98" height="0.02" depth="0.01" material="color: #ffffff; emissive: #00f0ff; emissiveIntensity: 3"></a-box>
+          <a-box position="0.48 0 0" width="0.02" height="1.3" depth="0.01" material="color: #ffffff; emissive: #00f0ff; emissiveIntensity: 3"></a-box>
+          <a-box position="-0.48 0 0" width="0.02" height="1.3" depth="0.01" material="color: #ffffff; emissive: #00f0ff; emissiveIntensity: 3"></a-box>
+          <!-- Holographic Hex Grid Lines -->
+          <a-ring radius-inner="0.32" radius-outer="0.34" material="color: #ffffff; opacity: 0.7; side: double"></a-ring>
+          <a-box position="0 0 0.002" width="0.75" height="0.005" depth="0.001" material="color: #00f0ff; opacity: 0.8"></a-box>
+          <a-box position="0 0 0.002" width="0.005" height="1.1" depth="0.001" material="color: #00f0ff; opacity: 0.8"></a-box>
         </a-entity>
       </a-entity>
 
-      <!-- RIGHT HAND: PRECISION BLASTER & LOCOMOTION -->
-      <a-entity id="rightHand" hand-controls="hand: right" right-stick-locomotion right-controller-blaster>
-        <!-- Hand Gun (Grip rotated to align naturally with Quest hand controller) -->
-        <a-entity id="right-hand-gun" visible="false" position="0 -0.02 -0.1" rotation="-18 0 0">
-          <!-- Receiver & Barrel -->
-          <a-box width="0.05" height="0.08" depth="0.25" color="#0284c7"></a-box>
-          <a-cylinder position="0 0.025 -0.15" rotation="90 0 0" radius="0.018" height="0.18" color="#00ffff"></a-cylinder>
-          <!-- Handle positioned directly in palm -->
-          <a-box position="0 -0.06 0.04" rotation="20 0 0" width="0.04" height="0.11" depth="0.05" color="#0b0f19"></a-box>
-          <!-- Muzzle Spawn Point (Front tip of barrel) -->
-          <a-entity id="gun-muzzle" position="0 0.025 -0.25"></a-entity>
+      <!-- RIGHT HAND: ARSENAL & LOCOMOTION -->
+      <a-entity id="rightHand" hand-controls="hand: right" stark-locomotion stark-arsenal>
+        <!-- Forearm Repulsor Gauntlet Model -->
+        <a-entity id="gauntlet" position="0 -0.02 -0.08" rotation="-15 0 0">
+          <a-box width="0.09" height="0.08" depth="0.22" color="#b91c1c" material="metalness: 0.9; roughness: 0.2"></a-box>
+          <a-cylinder position="0 0.02 -0.12" rotation="90 0 0" radius="0.035" height="0.04" color="#f59e0b" material="metalness: 0.8"></a-cylinder>
+          <!-- Palm Repulsor Core Node -->
+          <a-circle position="0 0.02 -0.141" rotation="0 180 0" radius="0.025" material="color: #00ffff; emissive: #00ffff; emissiveIntensity: 2.5"></a-circle>
+        </a-entity>
+
+        <!-- Continuous Red Laser Beam (Cylinder stretching 25m forward) -->
+        <a-entity id="red-laser-beam" visible="false" position="0 0 -12.5" rotation="90 0 0">
+          <a-cylinder radius="0.025" height="25" material="color: #ff0033; emissive: #ff0033; emissiveIntensity: 4; opacity: 0.95"></a-cylinder>
         </a-entity>
       </a-entity>
     </a-entity>
 
-    <!-- ENEMY ROBOT 1 -->
-    <a-entity id="robot1" enemy-robot position="-4 1.8 -7">
-      <a-box class="robot-core" width="0.6" height="0.6" depth="0.6" color="#334155"></a-box>
-      <a-sphere position="0 0.15 0.3" radius="0.12" color="#ff1744" material="emissive: #ff1744; emissiveIntensity: 1.5"></a-sphere>
-      <!-- Overhead Health Bar -->
-      <a-entity position="0 0.7 0">
-        <a-plane width="0.8" height="0.08" color="#991b1b"></a-plane>
-        <a-plane class="robot-hp-fill" width="0.8" height="0.08" color="#22c55e" position="0 0 0.005"></a-plane>
+    <!-- HIGH-QUALITY HOVER SENTRY MECH 1 -->
+    <a-entity id="sentry1" combat-sentry position="-5 2.2 -8">
+      <!-- Armored Torso -->
+      <a-box class="sentry-chassis" width="0.7" height="0.7" depth="0.7" color="#1e293b" material="metalness: 0.8; roughness: 0.3"></a-box>
+      <!-- Menacing Optical Eye Slit -->
+      <a-plane position="0 0.1 0.36" width="0.5" height="0.08" material="color: #ff3d00; emissive: #ff3d00; emissiveIntensity: 3"></a-plane>
+      <!-- Dual Shoulder Hover Thrusters with Jet Glow -->
+      <a-cylinder position="0.55 0.1 0" radius="0.14" height="0.5" color="#334155" material="metalness: 0.9"></a-cylinder>
+      <a-cone position="0.55 -0.22 0" rotation="180 0 0" radius-bottom="0.12" radius-top="0.02" height="0.2" material="color: #ff5722; emissive: #ff5722; emissiveIntensity: 2.5"></a-cone>
+      <a-cylinder position="-0.55 0.1 0" radius="0.14" height="0.5" color="#334155" material="metalness: 0.9"></a-cylinder>
+      <a-cone position="-0.55 -0.22 0" rotation="180 0 0" radius-bottom="0.12" radius-top="0.02" height="0.2" material="color: #ff5722; emissive: #ff5722; emissiveIntensity: 2.5"></a-cone>
+      <!-- Health Gauge -->
+      <a-entity position="0 0.8 0">
+        <a-plane width="0.8" height="0.06" color="#7f1d1d"></a-plane>
+        <a-plane class="sentry-hp-fill" width="0.8" height="0.06" color="#00f0ff" position="0 0 0.005"></a-plane>
       </a-entity>
     </a-entity>
 
-    <!-- ENEMY ROBOT 2 -->
-    <a-entity id="robot2" enemy-robot position="4 2.1 -9">
-      <a-box class="robot-core" width="0.6" height="0.6" depth="0.6" color="#334155"></a-box>
-      <a-sphere position="0 0.15 0.3" radius="0.12" color="#ff1744" material="emissive: #ff1744; emissiveIntensity: 1.5"></a-sphere>
-      <!-- Overhead Health Bar -->
-      <a-entity position="0 0.7 0">
-        <a-plane width="0.8" height="0.08" color="#991b1b"></a-plane>
-        <a-plane class="robot-hp-fill" width="0.8" height="0.08" color="#22c55e" position="0 0 0.005"></a-plane>
+    <!-- HIGH-QUALITY HOVER SENTRY MECH 2 -->
+    <a-entity id="sentry2" combat-sentry position="5 2.5 -10">
+      <a-box class="sentry-chassis" width="0.7" height="0.7" depth="0.7" color="#1e293b" material="metalness: 0.8; roughness: 0.3"></a-box>
+      <a-plane position="0 0.1 0.36" width="0.5" height="0.08" material="color: #ff3d00; emissive: #ff3d00; emissiveIntensity: 3"></a-plane>
+      <a-cylinder position="0.55 0.1 0" radius="0.14" height="0.5" color="#334155" material="metalness: 0.9"></a-cylinder>
+      <a-cone position="0.55 -0.22 0" rotation="180 0 0" radius-bottom="0.12" radius-top="0.02" height="0.2" material="color: #ff5722; emissive: #ff5722; emissiveIntensity: 2.5"></a-cone>
+      <a-cylinder position="-0.55 0.1 0" radius="0.14" height="0.5" color="#334155" material="metalness: 0.9"></a-cylinder>
+      <a-cone position="-0.55 -0.22 0" rotation="180 0 0" radius-bottom="0.12" radius-top="0.02" height="0.2" material="color: #ff5722; emissive: #ff5722; emissiveIntensity: 2.5"></a-cone>
+      <a-entity position="0 0.8 0">
+        <a-plane width="0.8" height="0.06" color="#7f1d1d"></a-plane>
+        <a-plane class="sentry-hp-fill" width="0.8" height="0.06" color="#00f0ff" position="0 0 0.005"></a-plane>
       </a-entity>
     </a-entity>
 
-    <!-- ENEMY ROBOT 3 -->
-    <a-entity id="robot3" enemy-robot position="0 2.4 -11">
-      <a-box class="robot-core" width="0.6" height="0.6" depth="0.6" color="#334155"></a-box>
-      <a-sphere position="0 0.15 0.3" radius="0.12" color="#ff1744" material="emissive: #ff1744; emissiveIntensity: 1.5"></a-sphere>
-      <!-- Overhead Health Bar -->
-      <a-entity position="0 0.7 0">
-        <a-plane width="0.8" height="0.08" color="#991b1b"></a-plane>
-        <a-plane class="robot-hp-fill" width="0.8" height="0.08" color="#22c55e" position="0 0 0.005"></a-plane>
+    <!-- HIGH-QUALITY HOVER SENTRY MECH 3 -->
+    <a-entity id="sentry3" combat-sentry position="0 2.8 -13">
+      <a-box class="sentry-chassis" width="0.7" height="0.7" depth="0.7" color="#1e293b" material="metalness: 0.8; roughness: 0.3"></a-box>
+      <a-plane position="0 0.1 0.36" width="0.5" height="0.08" material="color: #ff3d00; emissive: #ff3d00; emissiveIntensity: 3"></a-plane>
+      <a-cylinder position="0.55 0.1 0" radius="0.14" height="0.5" color="#334155" material="metalness: 0.9"></a-cylinder>
+      <a-cone position="0.55 -0.22 0" rotation="180 0 0" radius-bottom="0.12" radius-top="0.02" height="0.2" material="color: #ff5722; emissive: #ff5722; emissiveIntensity: 2.5"></a-cone>
+      <a-cylinder position="-0.55 0.1 0" radius="0.14" height="0.5" color="#334155" material="metalness: 0.9"></a-cylinder>
+      <a-cone position="-0.55 -0.22 0" rotation="180 0 0" radius-bottom="0.12" radius-top="0.02" height="0.2" material="color: #ff5722; emissive: #ff5722; emissiveIntensity: 2.5"></a-cone>
+      <a-entity position="0 0.8 0">
+        <a-plane width="0.8" height="0.06" color="#7f1d1d"></a-plane>
+        <a-plane class="sentry-hp-fill" width="0.8" height="0.06" color="#00f0ff" position="0 0 0.005"></a-plane>
       </a-entity>
     </a-entity>
   </a-scene>
