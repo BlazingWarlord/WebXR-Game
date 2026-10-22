@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Quest 3 Sci-Fi Arena</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- A-Frame 1.6.0 Core -->
+  <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+
+  <script>
+    // --- GLOBAL GAME STATE & MANAGER ---
+    window.GameState = {
+      playerHP: 100,
+      playerMaxHP: 100,
+      gunEquipped: false,
+      shieldActive: false,
+      projectiles: [],
+      robots: []
+    };
+
+    // --- RIGHT JOYSTICK SMOOTH LOCOMOTION ---
+    AFRAME.registerComponent('right-stick-locomotion', {
+      schema: { speed: { default: 3.5 } },
+      init: function () {
+        this.rig = document.getElementById('rig');
+        this.camera = document.getElementById('camera');
+        this.axisX = 0;
+        this.axisY = 0;
+
+        // Listen for thumbstick movement from Quest 3 right controller
+        this.el.addEventListener('axismove', (e) => {
+          const axis = e.detail.axis;
+          if (axis.length >= 2) {
+            this.axisX = axis[0];
+            this.axisY = axis[1];
+          }
+          if (axis.length >= 4 && (Math.abs(axis[2]) > 0.1 || Math.abs(axis[3]) > 0.1)) {
+            this.axisX = axis[2];
+            this.axisY = axis[3];
+          }
+        });
+
+        // Right thumbstick press to equip gun if nearby
+        this.el.addEventListener('thumbstickdown', () => {
+          this.tryEquipGun();
+        });
+      },
+      tryEquipGun: function () {
+        if (window.GameState.gunEquipped) return;
+        const rigPos = this.rig.object3D.position;
+        const gunPedestal = document.getElementById('gun-world-model');
+        if (gunPedestal) {
+          const gunPos = gunPedestal.object3D.position;
+          const dist = rigPos.distanceTo(gunPos);
+          if (dist < 4.5) {
+            window.GameState.gunEquipped = true;
+            gunPedestal.setAttribute('visible', 'false');
+            document.getElementById('right-hand-gun').setAttribute('visible', 'true');
+            document.getElementById('equip-hint').setAttribute('visible', 'false');
+          }
+        }
+      },
+      tick: function (time, delta) {
+        if (!delta || (Math.abs(this.axisX) < 0.15 && Math.abs(this.axisY) < 0.15)) return;
+
+        // If pushing joystick while standing near gun, auto-pickup as well
+        if (!window.GameState.gunEquipped) {
+          this.tryEquipGun();
+        }
+
+        const moveSpeed = (this.data.speed * delta) / 1000;
+        const camYaw = this.camera.object3D.rotation.y;
+
+        // Calculate translation relative to head direction
+        const dx = this.axisX * Math.cos(camYaw) + this.axisY * Math.sin(camYaw);
+        const dz = -this.axisX * Math.sin(camYaw) + this.axisY * Math.cos(camYaw);
+
+        this.rig.object3D.position.x += dx * moveSpeed;
+        this.rig.object3D.position.z += dz * moveSpeed;
+      }
+    });
+
+    // --- LEFT CONTROLLER: SHIELD SYSTEM ---
+    AFRAME.registerComponent('left-controller-shield', {
+      init: function () {
+        this.shieldMesh = document.getElementById('energy-shield');
+        this.el.addEventListener('triggerdown', () => {
+          window.GameState.shieldActive = true;
+          this.shieldMesh.setAttribute('visible', 'true');
+        });
+        this.el.addEventListener('triggerup', () => {
+          window.GameState.shieldActive = false;
+          this.shieldMesh.setAttribute('visible', 'false');
+        });
+      }
+    });
+
+    // --- RIGHT CONTROLLER: LASER BLASTER ---
+    AFRAME.registerComponent('right-controller-blaster', {
+      init: function () {
+        this.el.addEventListener('triggerdown', () => {
+          if (!window.GameState.gunEquipped) return;
+          this.fireLaser();
+        });
+      },
+      fireLaser: function () {
+        const scene = this.el.sceneEl;
+        const laser = document.createElement('a-entity');
+        
+        // Compute muzzle position and forward vector
+        const worldPos = new THREE.Vector3();
+        const worldDir = new THREE.Vector3(0, 0, -1);
+        this.el.object3D.getWorldPosition(worldPos);
+        this.el.object3D.getWorldDirection(worldDir);
+        worldDir.negate(); // Forward in three.js local coordinate space
+
+        // Create glowing laser beam projectile
+        laser.setAttribute('geometry', { primitive: 'cylinder', radius: 0.02, height: 0.5 });
+        laser.setAttribute('material', { color: '#00e5ff', emissive: '#00e5ff', emissiveIntensity: 2 });
+        laser.setAttribute('rotation', '90 0 0');
+        laser.object3D.position.copy(worldPos);
+        laser.object3D.quaternion.copy(this.el.object3D.quaternion);
+
+        laser.setAttribute('projectile', {
+          direction: `${worldDir.x} ${worldDir.y} ${worldDir.z}`,
+          speed: 25,
+          isEnemy: false
+        });
+
+        scene.appendChild(laser);
+      }
+    });
+
+    // --- BULLET / PROJECTILE PHYSICS & COLLISION ---
+    AFRAME.registerComponent('projectile', {
+      schema: {
+        direction: { type: 'vec3' },
+        speed: { default: 20 },
+        isEnemy: { default: false },
+        life: { default: 3.5 }
+      },
+      init: function () {
+        this.dir = new THREE.Vector3(this.data.direction.x, this.data.direction.y, this.data.direction.z).normalize();
+        this.age = 0;
+      },
+      tick: function (t, dt) {
+        if (!dt) return;
+        const step = (this.data.speed * dt) / 1000;
+        this.el.object3D.position.addScaledVector(this.dir, step);
+        this.age += dt / 1000;
+
+        if (this.age > this.data.life) {
+          this.destroyProjectile();
+          return;
+        }
+
+        const bulletPos = this.el.object3D.position;
+
+        // Player shooting Robots
+        if (!this.data.isEnemy) {
+          for (let robotEl of window.GameState.robots) {
+            if (!robotEl.parentNode) continue;
+            const rPos = robotEl.object3D.position;
+            if (bulletPos.distanceTo(rPos) < 0.9) {
+              robotEl.components['enemy-robot'].takeDamage(35);
+              this.destroyProjectile();
+              return;
+            }
+          }
+        } 
+        // Robots shooting Player
+        else {
+          const rig = document.getElementById('rig');
+          const cam = document.getElementById('camera');
+          const playerPos = new THREE.Vector3();
+          cam.object3D.getWorldPosition(playerPos);
+
+          // Check Shield Deflection first
+          if (window.GameState.shieldActive) {
+            const shieldEl = document.getElementById('energy-shield');
+            const shieldPos = new THREE.Vector3();
+            shieldEl.object3D.getWorldPosition(shieldPos);
+
+            if (bulletPos.distanceTo(shieldPos) < 0.8) {
+              // Blocked! Flash shield brightness
+              shieldEl.setAttribute('material', 'opacity', 0.85);
+              setTimeout(() => shieldEl.setAttribute('material', 'opacity', 0.45), 100);
+              this.destroyProjectile();
+              return;
+            }
+          }
+
+          // Check Player Hit
+          if (bulletPos.distanceTo(playerPos) < 0.7) {
+            window.GameState.playerHP = Math.max(0, window.GameState.playerHP - 15);
+            this.updatePlayerHUD();
+            this.destroyProjectile();
+            return;
+          }
+        }
+      },
+      updatePlayerHUD: function () {
+        const hpBar = document.getElementById('player-hp-bar');
+        const hpText = document.getElementById('player-hp-text');
+        const ratio = window.GameState.playerHP / window.GameState.playerMaxHP;
+        hpBar.setAttribute('scale', `${ratio} 1 1`);
+        hpText.setAttribute('value', `HEALTH: ${window.GameState.playerHP} / 100`);
+
+        if (window.GameState.playerHP <= 0) {
+          hpText.setAttribute('value', 'SYSTEM COMPROMISED - RESPAWNING...');
+          setTimeout(() => {
+            window.GameState.playerHP = 100;
+            hpBar.setAttribute('scale', '1 1 1');
+            hpText.setAttribute('value', 'HEALTH: 100 / 100');
+          }, 3000);
+        }
+      },
+      destroyProjectile: function () {
+        if (this.el.parentNode) {
+          this.el.parentNode.removeChild(this.el);
+        }
+      }
+    });
+
+    // --- ENEMY ROBOT AI & HEALTH BARS ---
+    AFRAME.registerComponent('enemy-robot', {
+      schema: {
+        hp: { default: 100 }
+      },
+      init: function () {
+        this.maxHp = this.data.hp;
+        this.currentHp = this.data.hp;
+        this.shootTimer = Math.random() * 2 + 1;
+        this.targetPos = new THREE.Vector3(
+          (Math.random() - 0.5) * 16,
+          1.5 + Math.random(),
+          (Math.random() - 0.5) * 16
+        );
+
+        window.GameState.robots.push(this.el);
+        this.hpBar = this.el.querySelector('.robot-hp-fill');
+      },
+      tick: function (t, dt) {
+        if (!dt) return;
+        const rigPos = document.getElementById('camera').object3D;
+        const worldPlayerPos = new THREE.Vector3();
+        rigPos.getWorldPosition(worldPlayerPos);
+
+        // Hover smoothly toward target position
+        this.el.object3D.position.lerp(this.targetPos, 0.015);
+        if (this.el.object3D.position.distanceTo(this.targetPos) < 1.0) {
+          this.targetPos.set((Math.random() - 0.5) * 16, 1.5 + Math.random(), (Math.random() - 0.5) * 16);
+        }
+
+        // Face the player
+        this.el.object3D.lookAt(worldPlayerPos.x, this.el.object3D.position.y, worldPlayerPos.z);
+
+        // Robot AI shooting cycle
+        this.shootTimer -= dt / 1000;
+        if (this.shootTimer <= 0) {
+          this.shootAtPlayer(worldPlayerPos);
+          this.shootTimer = 2.5 + Math.random() * 2;
+        }
+      },
+      shootAtPlayer: function (targetVec) {
+        const scene = this.el.sceneEl;
+        const robotPos = this.el.object3D.position.clone();
+        robotPos.y += 0.2; // Eye height
+
+        const dir = new THREE.Vector3().subVectors(targetVec, robotPos).normalize();
+
+        const bolt = document.createElement('a-entity');
+        bolt.setAttribute('geometry', { primitive: 'sphere', radius: 0.1 });
+        bolt.setAttribute('material', { color: '#ff1744', emissive: '#ff1744', emissiveIntensity: 2 });
+        bolt.object3D.position.copy(robotPos);
+
+        bolt.setAttribute('projectile', {
+          direction: `${dir.x} ${dir.y} ${dir.z}`,
+          speed: 10,
+          isEnemy: true
+        });
+
+        scene.appendChild(bolt);
+      },
+      takeDamage: function (amount) {
+        this.currentHp -= amount;
+        const ratio = Math.max(0, this.currentHp / this.maxHp);
+        if (this.hpBar) {
+          this.hpBar.setAttribute('scale', `${ratio} 1 1`);
+        }
+
+        // Hit flash
+        this.el.querySelector('.robot-core').setAttribute('material', 'color', '#ffffff');
+        setTimeout(() => {
+          this.el.querySelector('.robot-core').setAttribute('material', 'color', '#37474f');
+        }, 80);
+
+        if (this.currentHp <= 0) {
+          // Respawn at fresh location
+          this.currentHp = this.maxHp;
+          if (this.hpBar) this.hpBar.setAttribute('scale', '1 1 1');
+          this.el.object3D.position.set((Math.random() - 0.5) * 20, 2, -5 - Math.random() * 10);
+        }
+      }
+    });
+  </script>
+</head>
+<body>
+  <a-scene background="color: #0d1117">
+    <!-- Ambient & Sun Lighting -->
+    <a-entity light="type: ambient; color: #607d8b; intensity: 0.8"></a-entity>
+    <a-entity light="type: directional; color: #ffffff; intensity: 0.9" position="5 10 4"></a-entity>
+
+    <!-- Sci-Fi Arena Environment -->
+    <a-plane position="0 0 0" rotation="-90 0 0" width="30" height="30" color="#1e293b" roughness="0.8"></a-plane>
+    <a-grid width="30" height="30" color="#38bdf8" opacity="0.15"></a-grid>
+    <a-cylinder position="0 2.5 -15" radius="15" height="5" side="back" open-ended="true" color="#0f172a"></a-cylinder>
+
+    <!-- Gun Pedestal (World Pickup) -->
+    <a-box id="pedestal" position="0 0.5 -2" width="0.6" height="1" depth="0.6" color="#334155"></a-box>
+    
+    <!-- Laser Gun Model on Pedestal -->
+    <a-entity id="gun-world-model" position="0 1.05 -2" rotation="0 45 0">
+      <a-box width="0.08" height="0.12" depth="0.25" color="#0284c7"></a-box>
+      <a-cylinder position="0 0.04 -0.18" rotation="90 0 0" radius="0.025" height="0.2" color="#38bdf8"></a-cylinder>
+      <a-box position="0 -0.08 0.04" rotation="20 0 0" width="0.06" height="0.12" depth="0.06" color="#0f172a"></a-box>
+    </a-entity>
+
+    <!-- Pickup Instruction Sign -->
+    <a-text 
+      id="equip-hint"
+      value="STEP NEAR & PUSH/CLICK RIGHT JOYSTICK\nTO EQUIP BLASTER" 
+      align="center" 
+      position="0 1.5 -2" 
+      scale="0.6 0.6 0.6" 
+      color="#38bdf8">
+    </a-text>
+
+    <!-- PLAYER RIG -->
+    <a-entity id="rig" position="0 0 1">
+      <!-- Head / VR Camera -->
+      <a-camera id="camera" position="0 1.6 0">
+        <!-- Floating Wrist/HUD Player Health Bar -->
+        <a-entity id="player-hud" position="0 -0.35 -0.8">
+          <!-- Background Bar -->
+          <a-plane width="0.6" height="0.05" color="#7f1d1d" opacity="0.8"></a-plane>
+          <!-- Green Dynamic Health Fill -->
+          <a-plane id="player-hp-bar" width="0.6" height="0.05" color="#22c55e" position="0 0 0.001"></a-plane>
+          <!-- Status Label -->
+          <a-text id="player-hp-text" value="HEALTH: 100 / 100" align="center" position="0 0.06 0" scale="0.2 0.2 0.2" color="#f8fafc"></a-text>
+        </a-entity>
+      </a-camera>
+
+      <!-- Left Controller (Energy Shield) -->
+      <a-entity id="leftHand" hand-controls="hand: left" left-controller-shield>
+        <!-- The Shield: Activates on Trigger Hold -->
+        <a-entity id="energy-shield" position="0 0 -0.1" visible="false">
+          <!-- Translucent Outer Energy Disc -->
+          <a-cylinder rotation="90 0 0" radius="0.45" height="0.01" material="color: #00e5ff; opacity: 0.45; transparent: true; emissive: #00e5ff; emissiveIntensity: 0.6"></a-cylinder>
+          <!-- Inner Core Ring -->
+          <a-ring radius-inner="0.35" radius-outer="0.42" rotation="0 0 0" material="color: #ffffff; opacity: 0.8; transparent: true"></a-ring>
+        </a-entity>
+      </a-entity>
+
+      <!-- Right Controller (Locomotion & Shooting) -->
+      <a-entity id="rightHand" hand-controls="hand: right" right-stick-locomotion right-controller-blaster>
+        <!-- Equipped Blaster Model attached to hand -->
+        <a-entity id="right-hand-gun" visible="false" position="0 -0.04 -0.1" rotation="0 0 0">
+          <a-box width="0.06" height="0.1" depth="0.25" color="#0284c7"></a-box>
+          <a-cylinder position="0 0.03 -0.16" rotation="90 0 0" radius="0.02" height="0.2" color="#38bdf8"></a-cylinder>
+          <a-box position="0 -0.06 0.04" rotation="15 0 0" width="0.05" height="0.1" depth="0.05" color="#0f172a"></a-box>
+        </a-entity>
+      </a-entity>
+    </a-entity>
+
+    <!-- ROBOT 1 -->
+    <a-entity id="robot1" enemy-robot position="-4 1.8 -6">
+      <a-box class="robot-core" width="0.6" height="0.6" depth="0.6" color="#37474f"></a-box>
+      <a-sphere position="0 0.2 0.3" radius="0.12" color="#ff1744" material="emissive: #ff1744; emissiveIntensity: 1"></a-sphere>
+      <a-cylinder position="0 -0.4 0" radius="0.15" height="0.3" color="#cfd8dc"></a-cylinder>
+      <!-- Floating Health Bar above Robot -->
+      <a-entity position="0 0.7 0">
+        <a-plane width="0.8" height="0.08" color="#b71c1c"></a-plane>
+        <a-plane class="robot-hp-fill" width="0.8" height="0.08" color="#00e676" position="0 0 0.005"></a-plane>
+      </a-entity>
+    </a-entity>
+
+    <!-- ROBOT 2 -->
+    <a-entity id="robot2" enemy-robot position="4 2.2 -8">
+      <a-box class="robot-core" width="0.6" height="0.6" depth="0.6" color="#37474f"></a-box>
+      <a-sphere position="0 0.2 0.3" radius="0.12" color="#ff1744" material="emissive: #ff1744; emissiveIntensity: 1"></a-sphere>
+      <a-cylinder position="0 -0.4 0" radius="0.15" height="0.3" color="#cfd8dc"></a-cylinder>
+      <!-- Floating Health Bar above Robot -->
+      <a-entity position="0 0.7 0">
+        <a-plane width="0.8" height="0.08" color="#b71c1c"></a-plane>
+        <a-plane class="robot-hp-fill" width="0.8" height="0.08" color="#00e676" position="0 0 0.005"></a-plane>
+      </a-entity>
+    </a-entity>
+
+    <!-- ROBOT 3 -->
+    <a-entity id="robot3" enemy-robot position="0 2.5 -11">
+      <a-box class="robot-core" width="0.6" height="0.6" depth="0.6" color="#37474f"></a-box>
+      <a-sphere position="0 0.2 0.3" radius="0.12" color="#ff1744" material="emissive: #ff1744; emissiveIntensity: 1"></a-sphere>
+      <a-cylinder position="0 -0.4 0" radius="0.15" height="0.3" color="#cfd8dc"></a-cylinder>
+      <!-- Floating Health Bar above Robot -->
+      <a-entity position="0 0.7 0">
+        <a-plane width="0.8" height="0.08" color="#b71c1c"></a-plane>
+        <a-plane class="robot-hp-fill" width="0.8" height="0.08" color="#00e676" position="0 0 0.005"></a-plane>
+      </a-entity>
+    </a-entity>
+
+    <!-- Starry Sky -->
+    <a-sky color="#020617"></a-sky>
+  </a-scene>
+</body>
+</html>
